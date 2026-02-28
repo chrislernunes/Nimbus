@@ -42,7 +42,6 @@ std::string BinanceOptionsClient::http_get(const std::string& url) const {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &buf);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        10L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    // Binance requires a User-Agent
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
                      "Nimbus/1.0 (github.com/chrislernunes/Nimbus)");
 
@@ -54,7 +53,8 @@ std::string BinanceOptionsClient::http_get(const std::string& url) const {
         long code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
         if (code != 200) {
-            std::cerr << "[HTTP] " << url << " -> " << code << "  body: " << buf << "\n";
+            std::cerr << "[HTTP] " << url << " -> " << code
+                      << "  body: " << buf << "\n";
             buf.clear();
         }
     }
@@ -68,7 +68,6 @@ bool BinanceOptionsClient::parse_symbol(const std::string& sym,
                                          std::string& exp_str,
                                          double& strike,
                                          OptionType& type) const {
-    // Format: UNDERLYING-YYMMDD-STRIKE-C/P
     std::vector<std::string> parts;
     std::string token;
     for (char c : sym) {
@@ -86,36 +85,35 @@ bool BinanceOptionsClient::parse_symbol(const std::string& sym,
     return true;
 }
 
-// -- "YYMMDD" -> fractional years from now -------------------------------------
+// -- "YYMMDD" -> fractional years from now ------------------------------------
 double BinanceOptionsClient::expiry_to_years(const std::string& exp_str,
                                               long long now) const {
-    // Parse YYMMDD
     if (exp_str.size() != 6) return 0.0;
     int yy = std::stoi(exp_str.substr(0, 2));
     int mm = std::stoi(exp_str.substr(2, 2));
     int dd = std::stoi(exp_str.substr(4, 2));
 
     std::tm tm_exp{};
-    tm_exp.tm_year = 100 + yy;  // years since 1900
+    tm_exp.tm_year = 100 + yy;
     tm_exp.tm_mon  = mm - 1;
     tm_exp.tm_mday = dd;
     tm_exp.tm_hour = 8;  // Binance options expire 08:00 UTC
 
-    // Convert to UTC timestamp
-    // mktime uses local time -- adjust for UTC
-    time_t t_exp = _mkgmtime(&tm_exp);
+    time_t    t_exp  = _mkgmtime(&tm_exp);
     long long exp_ms = static_cast<long long>(t_exp) * 1000LL;
-    double diff_ms = static_cast<double>(exp_ms - now);
-    return std::max(diff_ms / (1000.0 * 3600.0 * 24.0 * 365.0), 1.0/365.0);
+    double    diff_ms = static_cast<double>(exp_ms - now);
+    return std::max(diff_ms / (1000.0 * 3600.0 * 24.0 * 365.0), 1.0 / 365.0);
 }
 
 // -- Fetch spot index ----------------------------------------------------------
 double BinanceOptionsClient::fetch_spot() const {
-    std::string url = std::string(BASE_URL) + "/eapi/v1/index?underlying=" + underlying_ + "USDT";
+    std::string url  = std::string(BASE_URL)
+                     + "/eapi/v1/index?underlying=" + underlying_ + "USDT";
     std::string resp = http_get(url);
     if (resp.empty()) {
-        // Fallback: use Binance spot API
-        url = "https://api.binance.com/api/v3/ticker/price?symbol=" + underlying_ + "USDT";
+        // Fallback: Binance spot REST API
+        url  = "https://api.binance.com/api/v3/ticker/price?symbol="
+             + underlying_ + "USDT";
         resp = http_get(url);
         if (resp.empty()) return 0.0;
         auto j = json::parse(resp, nullptr, false);
@@ -129,25 +127,24 @@ double BinanceOptionsClient::fetch_spot() const {
 
 // -- Fetch available expiries --------------------------------------------------
 std::vector<std::string> BinanceOptionsClient::fetch_expiry_dates() const {
-    std::string url = std::string(BASE_URL) + "/eapi/v1/exchangeInfo";
+    std::string url  = std::string(BASE_URL) + "/eapi/v1/exchangeInfo";
     std::string resp = http_get(url);
     if (resp.empty()) return {};
 
     auto j = json::parse(resp, nullptr, false);
-    if (j.is_discarded()) return {};
+    if (j.is_discarded() || !j.contains("optionSymbols")) return {};
 
     std::vector<std::string> dates;
-    if (!j.contains("optionSymbols")) return {};
-
     for (const auto& sym : j["optionSymbols"]) {
         std::string name = sym.value("symbol", "");
         std::string und, exp_str;
         double strike;
         OptionType type;
-        if (parse_symbol(name, und, exp_str, strike, type)) {
-            if (und == underlying_ &&
-                std::find(dates.begin(), dates.end(), exp_str) == dates.end())
-                dates.push_back(exp_str);
+        if (parse_symbol(name, und, exp_str, strike, type) &&
+            und == underlying_ &&
+            std::find(dates.begin(), dates.end(), exp_str) == dates.end())
+        {
+            dates.push_back(exp_str);
         }
     }
     std::sort(dates.begin(), dates.end());
@@ -160,9 +157,8 @@ std::vector<BinanceOptionTicker> BinanceOptionsClient::fetch_expiry(
 {
     long long ts = now_ms_opt();
 
-    // Mark prices
-    std::string url = std::string(BASE_URL) + "/eapi/v1/mark?underlying="
-                    + underlying_ + "USDT&expiration=" + expiry_date;
+    std::string url  = std::string(BASE_URL) + "/eapi/v1/mark?underlying="
+                     + underlying_ + "USDT&expiration=" + expiry_date;
     std::string resp = http_get(url);
     if (resp.empty()) return {};
 
@@ -178,29 +174,39 @@ std::vector<BinanceOptionTicker> BinanceOptionsClient::fetch_expiry(
         if (!parse_symbol(sym, und, exp_str, strike, type)) continue;
 
         BinanceOptionTicker t;
-        t.symbol       = sym;
-        t.underlying   = und + "USDT";
-        t.type         = type;
-        t.strike       = strike;
-        t.expiry_years = expiry_to_years(exp_str, ts);
-        t.mark_price   = std::stod(item.value("markPrice",    "0"));
-        t.mark_iv      = std::stod(item.value("markIV",       "0"));
-        t.delta        = std::stod(item.value("delta",        "0"));
-        t.gamma        = std::stod(item.value("gamma",        "0"));
-        t.vega         = std::stod(item.value("vega",         "0"));
-        t.theta        = std::stod(item.value("theta",        "0"));
-        t.timestamp_ms = ts;
-
-        // Bid/ask from ticker endpoint
-        t.bid = 0.0;
-        t.ask = 0.0;
-
+        t.symbol        = sym;
+        t.underlying    = und + "USDT";
+        t.type          = type;
+        t.strike        = strike;
+        t.expiry_years  = expiry_to_years(exp_str, ts);
+        t.mark_price    = std::stod(item.value("markPrice", "0"));
+        t.mark_iv       = std::stod(item.value("markIV",    "0"));
+        t.delta         = std::stod(item.value("delta",     "0"));
+        t.gamma         = std::stod(item.value("gamma",     "0"));
+        t.vega          = std::stod(item.value("vega",      "0"));
+        t.theta         = std::stod(item.value("theta",     "0"));
+        t.bid           = 0.0;
+        t.ask           = 0.0;
+        t.open_interest = 0.0;
+        t.timestamp_ms  = ts;
         tickers.push_back(t);
     }
     return tickers;
 }
 
 // -- Fetch full chain ----------------------------------------------------------
+//
+// Endpoints used per poll cycle:
+//   GET /eapi/v1/index   — spot price
+//   GET /eapi/v1/mark    — mark prices + greeks for all contracts
+//   GET /eapi/v1/ticker  — bid/ask for all contracts
+//
+// NOTE: /eapi/v1/openInterest returns HTTP 400 {"code":-6010,"msg":"open
+// interest error data."} for every expiry. OI is therefore not available
+// from Binance EAPI at this time. The open_interest field on all tickers
+// is set to 0.0, and FilterConfig::min_open_interest must be set to 0.0
+// (which is done in demo_live / demo_record_and_replay in main.cpp).
+//
 OptionsChain BinanceOptionsClient::fetch_chain() const {
     long long ts = now_ms_opt();
     OptionsChain chain;
@@ -214,11 +220,10 @@ OptionsChain BinanceOptionsClient::fetch_chain() const {
         return chain;
     }
 
-    // 2. Get all mark prices in one shot via /eapi/v1/mark (no expiry filter)
-    std::string url = std::string(BASE_URL) + "/eapi/v1/mark?underlying="
-                    + underlying_ + "USDT";
+    // 2. All mark prices + greeks (single request, all expiries)
+    std::string url  = std::string(BASE_URL) + "/eapi/v1/mark?underlying="
+                     + underlying_ + "USDT";
     std::string resp = http_get(url);
-
     if (resp.empty()) {
         std::cerr << "[Chain] Empty response from mark endpoint\n";
         return chain;
@@ -239,33 +244,32 @@ OptionsChain BinanceOptionsClient::fetch_chain() const {
         if (und != underlying_) continue;
 
         double exp_years = expiry_to_years(exp_str, ts);
-        if (exp_years <= 0.0) continue;  // already expired
+        if (exp_years <= 0.0) continue;
 
         BinanceOptionTicker t;
-        t.symbol       = sym;
-        t.underlying   = und + "USDT";
-        t.type         = type;
-        t.strike       = strike;
-        t.expiry_years = exp_years;
-        t.expiry_ts_ms = ts + static_cast<long long>(exp_years * 365.0 * 86400000.0);
-        t.mark_price   = std::stod(item.value("markPrice",    "0"));
-        t.mark_iv      = std::stod(item.value("markIV",       "0"));
-        t.delta        = std::stod(item.value("delta",        "0"));
-        t.gamma        = std::stod(item.value("gamma",        "0"));
-        t.vega         = std::stod(item.value("vega",         "0"));
-        t.theta        = std::stod(item.value("theta",        "0"));
-        t.bid          = 0.0;
-        t.ask          = 0.0;
-        t.open_interest = std::stod(item.value("openInterest", "0"));
-        t.volume_24h   = std::stod(item.value("amount",        "0"));
-        t.timestamp_ms = ts;
-
+        t.symbol        = sym;
+        t.underlying    = und + "USDT";
+        t.type          = type;
+        t.strike        = strike;
+        t.expiry_years  = exp_years;
+        t.expiry_ts_ms  = ts + static_cast<long long>(exp_years * 365.0 * 86400000.0);
+        t.mark_price    = std::stod(item.value("markPrice", "0"));
+        t.mark_iv       = std::stod(item.value("markIV",    "0"));
+        t.delta         = std::stod(item.value("delta",     "0"));
+        t.gamma         = std::stod(item.value("gamma",     "0"));
+        t.vega          = std::stod(item.value("vega",      "0"));
+        t.theta         = std::stod(item.value("theta",     "0"));
+        t.bid           = 0.0;
+        t.ask           = 0.0;
+        t.open_interest = 0.0;   // see note above
+        t.volume_24h    = std::stod(item.value("amount",    "0"));
+        t.timestamp_ms  = ts;
         chain.tickers.push_back(t);
     }
 
-    // 3. Enrich with bid/ask from ticker endpoint
-    std::string tick_url = std::string(BASE_URL) + "/eapi/v1/ticker?underlying="
-                         + underlying_ + "USDT";
+    // 3. Enrich with bid/ask from /eapi/v1/ticker
+    std::string tick_url  = std::string(BASE_URL) + "/eapi/v1/ticker?underlying="
+                          + underlying_ + "USDT";
     std::string tick_resp = http_get(tick_url);
     if (!tick_resp.empty()) {
         auto tj = json::parse(tick_resp, nullptr, false);
@@ -287,28 +291,34 @@ OptionsChain BinanceOptionsClient::fetch_chain() const {
         }
     }
 
-    std::cout << "[Chain] Fetched " << chain.tickers.size()
-              << " contracts  spot=" << std::fixed << std::setprecision(2) << chain.spot
-              << "  ts=" << ts << "\n";
+    // 4. Diagnostic summary
+    {
+        int with_iv = 0, with_bid = 0;
+        for (const auto& t : chain.tickers) {
+            if (t.mark_iv > 0.0) with_iv++;
+            if (t.bid     > 0.0) with_bid++;
+        }
+        std::cout << "[Chain] Fetched " << chain.tickers.size()
+                  << " contracts  spot=" << std::fixed << std::setprecision(2)
+                  << chain.spot
+                  << "  with_iv=" << with_iv
+                  << "  with_bid=" << with_bid
+                  << "  ts=" << ts << "\n";
+    }
+
     return chain;
 }
 
-// -- Convert chain to SurfacePoints --------------------------------------------
+// -- Convert chain to SurfacePoints -------------------------------------------
 std::vector<SurfacePoint> OptionsChain::to_surface_points(
-    double min_oi, double min_bid, double max_spread_iv) const
+    double min_oi, double min_bid, double /*max_spread_iv*/) const
 {
     std::vector<SurfacePoint> pts;
     for (const auto& t : tickers) {
-        if (t.open_interest < min_oi)   continue;
-        if (t.mark_iv <= 0.0)           continue;
-        if (t.mark_price <= 0.0)        continue;
-
-        // Filter by bid/ask spread if available
-        if (t.bid > 0 && t.ask > 0) {
-            if (t.bid < min_bid) continue;
-            // Estimate IV bid/ask spread -- skip very wide markets
-            // (crude: use mark_price ± half bid-ask as proxy)
-        }
+        if (t.open_interest < min_oi)      continue;
+        if (t.mark_iv  <= 0.0)             continue;
+        if (t.mark_price <= 0.0)           continue;
+        if (t.bid > 0 && t.bid < min_bid)  continue;
 
         SurfacePoint p;
         p.strike = t.strike;
@@ -333,7 +343,7 @@ void BinanceOptionsClient::start_live(ChainCallback cb, int interval_ms) {
             } catch (const std::exception& e) {
                 std::cerr << "[Live] Exception: " << e.what() << "\n";
             }
-            auto elapsed = std::chrono::steady_clock::now() - t0;
+            auto elapsed  = std::chrono::steady_clock::now() - t0;
             auto sleep_ms = std::chrono::milliseconds(interval_ms) - elapsed;
             if (sleep_ms.count() > 0)
                 std::this_thread::sleep_for(sleep_ms);
@@ -346,9 +356,10 @@ void BinanceOptionsClient::stop() {
     if (poll_thread_.joinable()) poll_thread_.join();
 }
 
-// -- Record snapshot to CSV ----------------------------------------------------
-// CSV format:
-// timestamp_ms,spot,symbol,type,strike,expiry_years,mark_iv,bid,ask,delta,gamma,vega,theta,oi,vol
+// -- Record snapshot to CSV ---------------------------------------------------
+// CSV schema:
+//   timestamp_ms, spot, symbol, type, strike, expiry_years,
+//   mark_iv, bid, ask, delta, gamma, vega, theta, open_interest, volume_24h
 void BinanceOptionsClient::record_snapshot(const OptionsChain& chain,
                                             const std::string& filepath) const {
     bool write_header = false;
@@ -386,7 +397,7 @@ void BinanceOptionsClient::record_snapshot(const OptionsChain& chain,
     }
 }
 
-// -- Load snapshots from CSV ---------------------------------------------------
+// -- Load snapshots from CSV --------------------------------------------------
 std::vector<HistoricalSnapshot> BinanceOptionsClient::load_snapshots(
     const std::string& filepath) const
 {
@@ -408,58 +419,58 @@ std::vector<HistoricalSnapshot> BinanceOptionsClient::load_snapshots(
         while (std::getline(ss, field, ',')) fields.push_back(field);
         if (fields.size() < 15) continue;
 
-        long long ts  = std::stoll(fields[0]);
-        double spot   = std::stod(fields[1]);
-        // std::string sym = fields[2];
-        OptionType type = (fields[3] == "C") ? OptionType::CALL : OptionType::PUT;
-        double strike   = std::stod(fields[4]);
-        double exp_yrs  = std::stod(fields[5]);
-        double mark_iv  = std::stod(fields[6]);
-        double bid      = std::stod(fields[7]);
-        double ask_val  = std::stod(fields[8]);
-        double delta    = std::stod(fields[9]);
-        double gamma    = std::stod(fields[10]);
-        double vega_v   = std::stod(fields[11]);
-        double theta    = std::stod(fields[12]);
-        double oi       = std::stod(fields[13]);
-        double vol24    = std::stod(fields[14]);
+        long long  ts      = std::stoll(fields[0]);
+        double     spot    = std::stod(fields[1]);
+        OptionType type    = (fields[3] == "C") ? OptionType::CALL : OptionType::PUT;
+        double     strike  = std::stod(fields[4]);
+        double     exp_yrs = std::stod(fields[5]);
+        double     mark_iv = std::stod(fields[6]);
+        double     bid     = std::stod(fields[7]);
+        double     ask_val = std::stod(fields[8]);
+        double     delta   = std::stod(fields[9]);
+        double     gamma   = std::stod(fields[10]);
+        double     vega_v  = std::stod(fields[11]);
+        double     theta   = std::stod(fields[12]);
+        double     oi      = std::stod(fields[13]);
+        double     vol24   = std::stod(fields[14]);
 
-        auto& snap = by_ts[ts];
-        snap.timestamp_ms = ts;
-        snap.spot = spot;
-        snap.chain.spot = spot;
+        auto& snap              = by_ts[ts];
+        snap.timestamp_ms       = ts;
+        snap.spot               = spot;
+        snap.chain.spot         = spot;
         snap.chain.timestamp_ms = ts;
 
         BinanceOptionTicker t;
-        t.symbol       = fields[2];
-        t.type         = type;
-        t.strike       = strike;
-        t.expiry_years = exp_yrs;
-        t.mark_iv      = mark_iv;
-        t.bid          = bid;
-        t.ask          = ask_val;
-        t.delta        = delta;
-        t.gamma        = gamma;
-        t.vega         = vega_v;
-        t.theta        = theta;
+        t.symbol        = fields[2];
+        t.type          = type;
+        t.strike        = strike;
+        t.expiry_years  = exp_yrs;
+        t.mark_iv       = mark_iv;
+        t.bid           = bid;
+        t.ask           = ask_val;
+        t.delta         = delta;
+        t.gamma         = gamma;
+        t.vega          = vega_v;
+        t.theta         = theta;
         t.open_interest = oi;
-        t.volume_24h   = vol24;
-        t.timestamp_ms = ts;
+        t.volume_24h    = vol24;
+        t.timestamp_ms  = ts;
         snap.chain.tickers.push_back(t);
     }
 
     std::vector<HistoricalSnapshot> result;
     result.reserve(by_ts.size());
     for (auto& [ts, snap] : by_ts) {
-        snap.surface_pts = snap.chain.to_surface_points();
+        snap.surface_pts = snap.chain.to_surface_points(0.0); // OI filter off
         result.push_back(std::move(snap));
     }
 
-    std::cout << "[Load] Loaded " << result.size() << " snapshots from " << filepath << "\n";
+    std::cout << "[Load] Loaded " << result.size()
+              << " snapshots from " << filepath << "\n";
     return result;
 }
 
-// -- Replay historical snapshots -----------------------------------------------
+// -- Replay historical snapshots ----------------------------------------------
 void BinanceOptionsClient::replay(const std::vector<HistoricalSnapshot>& snaps,
                                    ChainCallback cb,
                                    double speed_factor) const {
@@ -472,10 +483,10 @@ void BinanceOptionsClient::replay(const std::vector<HistoricalSnapshot>& snaps,
         cb(snaps[i].chain);
 
         if (i + 1 < snaps.size() && speed_factor > 0.0) {
-            long long gap_ms = snaps[i+1].timestamp_ms - snaps[i].timestamp_ms;
+            long long gap_ms   = snaps[i+1].timestamp_ms - snaps[i].timestamp_ms;
             long long sleep_ms = static_cast<long long>(
                 static_cast<double>(gap_ms) / speed_factor);
-            if (sleep_ms > 0 && sleep_ms < 300000) // cap at 5 min
+            if (sleep_ms > 0 && sleep_ms < 300000)
                 std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         }
     }
