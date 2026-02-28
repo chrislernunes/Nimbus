@@ -2,6 +2,7 @@
 #include "types.hpp"
 #include <string>
 #include <vector>
+#include <map>
 #include <functional>
 #include <atomic>
 #include <thread>
@@ -25,6 +26,9 @@ struct BinanceOptionTicker {
     double      gamma;
     double      vega;
     double      theta;
+    // NOTE: open_interest is always 0.0 — /eapi/v1/openInterest returns
+    // HTTP 400 {"code":-6010} for every expiry. FilterConfig::min_open_interest
+    // must be set to 0.0 to avoid rejecting all contracts.
     double      open_interest;
     double      volume_24h;
     long long   timestamp_ms;
@@ -32,16 +36,17 @@ struct BinanceOptionTicker {
 
 // Parsed result of a full chain fetch
 struct OptionsChain {
-    std::string             underlying;   // "BTC"
-    double                  spot;
-    long long               timestamp_ms;
+    std::string              underlying;   // "BTC"
+    double                   spot;
+    long long                timestamp_ms;
     std::vector<BinanceOptionTicker> tickers;
 
-    // Convenience: filter to surface-ready points
+    // Convenience: filter to surface-ready points.
+    // Pass min_oi=0.0 since OI is unavailable from Binance EAPI.
     std::vector<SurfacePoint> to_surface_points(
-        double min_oi    = 1.0,         // min open interest
-        double min_bid   = 0.0,         // min bid price
-        double max_spread_iv = 0.20     // max bid-ask IV spread
+        double min_oi        = 0.0,   // OI unavailable — keep at 0
+        double min_bid       = 0.0,
+        double max_spread_iv = 0.20
     ) const;
 };
 
@@ -57,14 +62,16 @@ struct HistoricalSnapshot {
 //
 // Fetches live and historical options data from Binance EAPI.
 //
-// Live endpoints used:
-//   GET /eapi/v1/mark          — mark prices + Greeks for all strikes/expiries
-//   GET /eapi/v1/ticker        — live bid/ask
-//   GET /eapi/v1/index         — underlying spot index price
+// Live endpoints used per poll cycle:
+//   GET /eapi/v1/index   — underlying spot index price       (weight: 1)
+//   GET /eapi/v1/mark    — mark prices + Greeks, all expiries (weight: 5)
+//   GET /eapi/v1/ticker  — live bid/ask, all contracts       (weight: 5)
+//
+// NOT used (endpoint broken — returns -6010 for all expiries):
+//   GET /eapi/v1/openInterest
 //
 // Rate limits:
-//   Binance EAPI: 400 req/min weight-based
-//   We use 1 full chain fetch every 30s = well within limits
+//   3 requests × 2 polls/min = 6 req/min — well within 400 req/min limit.
 //
 class BinanceOptionsClient {
 public:
@@ -75,7 +82,7 @@ public:
     // Current spot index price
     double fetch_spot() const;
 
-    // Full options chain (mark prices + Greeks)
+    // Full options chain (mark prices + Greeks, all expiries)
     OptionsChain fetch_chain() const;
 
     // Mark price + Greeks for a single expiry
@@ -89,8 +96,8 @@ public:
 
     using ChainCallback = std::function<void(const OptionsChain&)>;
 
-    // Start polling loop: fetches full chain every `interval_ms`, calls cb
-    // Runs in background thread until stop() is called
+    // Start polling loop: fetches full chain every `interval_ms`, calls cb.
+    // Runs in background thread until stop() is called.
     void start_live(ChainCallback cb, int interval_ms = 30000);
     void stop();
     bool is_running() const { return running_; }
@@ -103,16 +110,16 @@ public:
     // Load snapshots from a CSV file
     std::vector<HistoricalSnapshot> load_snapshots(const std::string& filepath) const;
 
-    // Replay snapshots, calling cb for each one at the original cadence
+    // Replay snapshots, calling cb for each one at the original cadence.
     // speed_factor: 1.0 = real-time, 10.0 = 10x faster, 0.0 = instant
     void replay(const std::vector<HistoricalSnapshot>& snapshots,
                 ChainCallback cb,
                 double speed_factor = 10.0) const;
 
 private:
-    std::string      underlying_;   // "BTC"
+    std::string       underlying_;
     std::atomic<bool> running_{false};
-    std::thread      poll_thread_;
+    std::thread       poll_thread_;
 
     // HTTP GET helper (libcurl)
     std::string http_get(const std::string& url) const;
